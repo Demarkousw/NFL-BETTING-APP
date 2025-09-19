@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from elo import calculate_elo, predict_margin
+from elo import calculate_elo, update_elo, predict_margin
 
 # --- Sidebar Settings ---
 st.sidebar.title("Settings")
@@ -15,11 +15,33 @@ k_factor = st.sidebar.number_input("K-Factor", 1, 50, 20)
 odds_api_key = st.secrets["THE_ODDS_API_KEY"]
 weather_api_key = st.secrets.get("WEATHER_API_KEY", None)
 
-# --- Fetch Odds ---
+# --- Load Historical Games CSV ---
+@st.cache_data(ttl=3600)
+def load_historical_games():
+    # CSV should have: date, home_team, away_team, home_score, away_score
+    return pd.read_csv("historical_games.csv")
+
+historical_games = load_historical_games()
+
+# --- Initialize Elo Ratings ---
+elo_ratings = {}
+for idx, row in historical_games.iterrows():
+    home = row["home_team"]
+    away = row["away_team"]
+    home_score = row["home_score"]
+    away_score = row["away_score"]
+    
+    home_elo, away_elo = elo_ratings.get(home, base_elo), elo_ratings.get(away, base_elo)
+    home_elo, away_elo = update_elo(home_elo, away_elo, home_score, away_score, k_factor)
+    
+    elo_ratings[home] = home_elo
+    elo_ratings[away] = away_elo
+
+# --- Fetch Upcoming Odds ---
 @st.cache_data(ttl=3600)
 def fetch_odds(sport):
-    # Replace with actual The Odds API call
-    # Should return columns: home_team, away_team, game_time, moneyline_home, moneyline_away,
+    # Replace with your Odds API call
+    # Must return columns: home_team, away_team, game_time, moneyline_home, moneyline_away,
     # spread_home, spread_away, total_points, venue
     return pd.DataFrame()  # placeholder
 
@@ -38,7 +60,7 @@ odds_df = odds_df[odds_df["Week"] == selected_week]
 def fetch_weather(venue):
     if not weather_api_key:
         return None
-    # Call a weather API (e.g., OpenWeatherMap)
+    # Call a weather API (OpenWeatherMap, etc.)
     return {"temp": 70, "wind": 5, "rain": 0}
 
 # --- Injury Function ---
@@ -59,8 +81,9 @@ for idx, row in odds_df.iterrows():
     home_injuries = fetch_injuries(home)
     away_injuries = fetch_injuries(away)
     
-    # Elo prediction
-    home_elo, away_elo = calculate_elo(home, away, base_elo)
+    # Elo prediction from historical ratings
+    home_elo = elo_ratings.get(home, base_elo)
+    away_elo = elo_ratings.get(away, base_elo)
     predicted_margin = predict_margin(home_elo, away_elo)
     
     # Adjust for injuries
@@ -73,8 +96,7 @@ for idx, row in odds_df.iterrows():
     # --- Moneyline Edge ---
     prob_home_win = 1 / (1 + 10 ** ((away_elo - home_elo)/400))
     prob_away_win = 1 - prob_home_win
-    # Implied probability placeholder (replace with actual conversion from moneyline)
-    implied_home = 0.5  
+    implied_home = 0.5  # placeholder conversion from moneyline
     implied_away = 0.5
     edge_home_ml = prob_home_win - implied_home
     edge_away_ml = prob_away_win - implied_away
@@ -100,6 +122,20 @@ for idx, row in odds_df.iterrows():
     best_edge = edges[best_bet_type]
     stake = bankroll * fractional_kelly * max(0,best_edge)
     
+    # --- Determine Selection & Opponent ---
+    if "Home" in best_bet_type:
+        selection_team = home
+        opponent = away
+        display_bet = best_bet_type.replace("Home","")  # ML or Spread
+    elif "Away" in best_bet_type:
+        selection_team = away
+        opponent = home
+        display_bet = best_bet_type.replace("Away","")
+    elif best_bet_type in ["Over", "Under"]:
+        selection_team = "Total Points"
+        opponent = f"{away} @ {home}"
+        display_bet = best_bet_type
+    
     recommendations.append({
         "Week": row["Week"],
         "Matchup": row["Matchup"],
@@ -107,7 +143,9 @@ for idx, row in odds_df.iterrows():
         "Away": away,
         "Time": game_time.strftime("%Y-%m-%d %H:%M"),
         "Weather": weather,
-        "Best Bet Type": best_bet_type,
+        "Selection": selection_team,
+        "Opponent": opponent,
+        "Best Bet": display_bet,
         "Edge %": round(best_edge*100,2),
         "Stake $": round(stake,2)
     })
